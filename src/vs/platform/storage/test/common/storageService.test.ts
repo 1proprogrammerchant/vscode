@@ -30,6 +30,25 @@ export function createSuite<T extends IStorageService>(params: { setup: () => Pr
 		storeData(StorageScope.WORKSPACE);
 	});
 
+	test('Storage change source', () => {
+		const storageValueChangeEvents: IStorageValueChangeEvent[] = [];
+		storageService.onDidChangeValue(e => storageValueChangeEvents.push(e));
+
+		// Explicit external source
+		storageService.storeAll([{ key: 'testExternalChange', value: 'foobar', scope: StorageScope.WORKSPACE, target: StorageTarget.MACHINE }], true);
+		let storageValueChangeEvent = storageValueChangeEvents.find(e => e.key === 'testExternalChange');
+		strictEqual(storageValueChangeEvent?.external, true);
+
+		// Default source
+		storageService.storeAll([{ key: 'testChange', value: 'barfoo', scope: StorageScope.WORKSPACE, target: StorageTarget.MACHINE }], false);
+		storageValueChangeEvent = storageValueChangeEvents.find(e => e.key === 'testChange');
+		strictEqual(storageValueChangeEvent?.external, false);
+
+		storageService.store('testChange', 'foobar', StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		storageValueChangeEvent = storageValueChangeEvents.find(e => e.key === 'testChange');
+		strictEqual(storageValueChangeEvent?.external, false);
+	});
+
 	function storeData(scope: StorageScope): void {
 		let storageValueChangeEvents: IStorageValueChangeEvent[] = [];
 		storageService.onDidChangeValue(e => storageValueChangeEvents.push(e));
@@ -42,6 +61,7 @@ export function createSuite<T extends IStorageService>(params: { setup: () => Pr
 		strictEqual(storageService.getBoolean('test.getBoolean', scope, false), false);
 		deepStrictEqual(storageService.getObject('test.getObject', scope, { 'foo': 'bar' }), { 'foo': 'bar' });
 		deepStrictEqual(storageService.getObject('test.getObject', scope, {}), {});
+		deepStrictEqual(storageService.getObject('test.getObject', scope, []), []);
 
 		storageService.store('test.get', 'foobar', scope, StorageTarget.MACHINE);
 		strictEqual(storageService.get('test.get', scope, (undefined)!), 'foobar');
@@ -71,6 +91,9 @@ export function createSuite<T extends IStorageService>(params: { setup: () => Pr
 		storageService.store('test.getObject', {}, scope, StorageTarget.MACHINE);
 		deepStrictEqual(storageService.getObject('test.getObject', scope, (undefined)!), {});
 
+		storageService.store('test.getObject', [42], scope, StorageTarget.MACHINE);
+		deepStrictEqual(storageService.getObject('test.getObject', scope, (undefined)!), [42]);
+
 		storageService.store('test.getObject', { 'foo': {} }, scope, StorageTarget.MACHINE);
 		deepStrictEqual(storageService.getObject('test.getObject', scope, (undefined)!), { 'foo': {} });
 
@@ -78,6 +101,16 @@ export function createSuite<T extends IStorageService>(params: { setup: () => Pr
 		strictEqual(storageService.getNumber('test.getNumberDefault', scope, 5), 5);
 		strictEqual(storageService.getBoolean('test.getBooleanDefault', scope, true), true);
 		deepStrictEqual(storageService.getObject('test.getObjectDefault', scope, { 'foo': 42 }), { 'foo': 42 });
+
+		storageService.storeAll([
+			{ key: 'test.storeAll1', value: 'foobar', scope, target: StorageTarget.MACHINE },
+			{ key: 'test.storeAll2', value: 4, scope, target: StorageTarget.MACHINE },
+			{ key: 'test.storeAll3', value: null, scope, target: StorageTarget.MACHINE }
+		], false);
+
+		strictEqual(storageService.get('test.storeAll1', scope, 'foobar'), 'foobar');
+		strictEqual(storageService.get('test.storeAll2', scope, '4'), '4');
+		strictEqual(storageService.get('test.storeAll3', scope, 'null'), 'null');
 	}
 
 	test('Remove Data (application)', () => {

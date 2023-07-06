@@ -21,7 +21,7 @@ import { ITerminalService } from 'vs/workbench/contrib/terminal/browser/terminal
 import { IDebugService } from 'vs/workbench/contrib/debug/common/debug';
 import { IRemoteAgentService } from 'vs/workbench/services/remote/common/remoteAgentService';
 import { isWeb, OperatingSystem } from 'vs/base/common/platform';
-import { ITunnelService, RemoteTunnel } from 'vs/platform/tunnel/common/tunnel';
+import { ITunnelService, RemoteTunnel, TunnelPrivacyId } from 'vs/platform/tunnel/common/tunnel';
 import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
 import { ViewPaneContainer } from 'vs/workbench/browser/parts/views/viewPaneContainer';
 import { IActivityService, NumberBadge } from 'vs/workbench/services/activity/common/activity';
@@ -31,6 +31,7 @@ import { IExternalUriOpenerService } from 'vs/workbench/contrib/externalUriOpene
 import { IHostService } from 'vs/workbench/services/host/browser/host';
 import { IConfigurationRegistry, Extensions as ConfigurationExtensions } from 'vs/platform/configuration/common/configurationRegistry';
 import { ILogService } from 'vs/platform/log/common/log';
+import { IWorkbenchConfigurationService } from 'vs/workbench/services/configuration/common/configuration';
 
 export const VIEWLET_ID = 'workbench.view.remote';
 
@@ -181,7 +182,7 @@ export class AutomaticPortForwarding extends Disposable implements IWorkbenchCon
 		@IRemoteExplorerService remoteExplorerService: IRemoteExplorerService,
 		@IWorkbenchEnvironmentService environmentService: IWorkbenchEnvironmentService,
 		@IContextKeyService contextKeyService: IContextKeyService,
-		@IConfigurationService configurationService: IConfigurationService,
+		@IWorkbenchConfigurationService configurationService: IWorkbenchConfigurationService,
 		@IDebugService debugService: IDebugService,
 		@IRemoteAgentService remoteAgentService: IRemoteAgentService,
 		@ITunnelService tunnelService: ITunnelService,
@@ -193,7 +194,7 @@ export class AutomaticPortForwarding extends Disposable implements IWorkbenchCon
 			return;
 		}
 
-		remoteAgentService.getEnvironment().then(environment => {
+		configurationService.whenRemoteConfigurationLoaded().then(() => remoteAgentService.getEnvironment()).then(environment => {
 			if (environment?.os !== OperatingSystem.Linux) {
 				Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration)
 					.registerDefaultConfigurations([{ overrides: { 'remote.autoForwardPortsSource': PORT_AUTO_SOURCE_SETTING_OUTPUT } }]);
@@ -348,6 +349,10 @@ class OnAutoForwardedAction extends Disposable {
 			choices.unshift(this.elevateChoice(tunnel));
 		}
 
+		if (tunnel.privacy === TunnelPrivacyId.Private && isWeb && this.tunnelService.canChangePrivacy) {
+			choices.push(this.makePublicChoice(tunnel));
+		}
+
 		message += this.linkMessage();
 
 		this.lastNotification = this.notificationService.prompt(Severity.Info, message, choices, { neverShowAgain: { id: 'remote.tunnelsView.autoForwardNeverShow', isSecondary: true } });
@@ -357,6 +362,24 @@ class OnAutoForwardedAction extends Disposable {
 			this.lastNotification = undefined;
 			this.lastShownPort = undefined;
 		});
+	}
+
+	private makePublicChoice(tunnel: RemoteTunnel): IPromptChoice {
+		return {
+			label: nls.localize('remote.tunnelsView.makePublic', "Make Public"),
+			run: async () => {
+				const oldTunnelDetails = mapHasAddressLocalhostOrAllInterfaces(this.remoteExplorerService.tunnelModel.forwarded, tunnel.tunnelRemoteHost, tunnel.tunnelRemotePort);
+				await this.remoteExplorerService.close({ host: tunnel.tunnelRemoteHost, port: tunnel.tunnelRemotePort }, TunnelCloseReason.Other);
+				return this.remoteExplorerService.forward({
+					remote: { host: tunnel.tunnelRemoteHost, port: tunnel.tunnelRemotePort },
+					local: tunnel.tunnelLocalPort,
+					name: oldTunnelDetails?.name,
+					elevateIfNeeded: true,
+					privacy: TunnelPrivacyId.Public,
+					source: oldTunnelDetails?.source
+				});
+			}
+		};
 	}
 
 	private openBrowserChoice(tunnel: RemoteTunnel): IPromptChoice {

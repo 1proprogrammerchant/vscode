@@ -210,6 +210,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 	protected _taskSystemInfos: Map<string, ITaskSystemInfo[]>;
 
 	protected _workspaceTasksPromise?: Promise<Map<string, IWorkspaceFolderTaskResult>>;
+	protected readonly _whenTaskSystemReady: Promise<void>;
 
 	protected _taskSystem?: ITaskSystem;
 	protected _taskSystemListeners?: IDisposable[] = [];
@@ -267,7 +268,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		@IInstantiationService private readonly _instantiationService: IInstantiationService
 	) {
 		super();
-
+		this._whenTaskSystemReady = Event.toPromise(this.onDidChangeTaskSystemInfo);
 		this._workspaceTasksPromise = undefined;
 		this._taskSystem = undefined;
 		this._taskSystemListeners = undefined;
@@ -303,11 +304,11 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		this._configurationResolverService.contributeVariable('defaultBuildTask', async (): Promise<string | undefined> => {
 			let tasks = await this._getTasksForGroup(TaskGroup.Build);
 			if (tasks.length > 0) {
-				const { none, defaults } = this._splitPerGroupType(tasks);
+				const defaults = this._getDefaultTasks(tasks);
 				if (defaults.length === 1) {
 					return defaults[0]._label;
-				} else if (defaults.length + none.length > 0) {
-					tasks = defaults.concat(none);
+				} else if (defaults.length) {
+					tasks = defaults;
 				}
 			}
 
@@ -344,7 +345,6 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 				}
 			}));
 		}
-
 		this._upgrade();
 	}
 
@@ -362,6 +362,8 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 			const processContext = ProcessExecutionSupportedContext.bindTo(this._contextKeyService);
 			processContext.set(process && !isVirtual);
 		}
+		// update tasks so an incomplete list isn't returned when getWorkspaceTasks is called
+		this._workspaceTasksPromise = undefined;
 		this._onDidRegisterSupportedExecutions.fire();
 	}
 
@@ -374,8 +376,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 			this._tasksReconnected = true;
 			return;
 		}
-		this._getTaskSystem();
-		this.getWorkspaceTasks().then(async () => {
+		this.getWorkspaceTasks(TaskRunSource.Reconnect).then(async () => {
 			this._tasksReconnected = await this._reconnectTasks();
 		});
 	}
@@ -1921,8 +1922,8 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 			this._modelService, this._configurationResolverService,
 			this._contextService, this._environmentService,
 			AbstractTaskService.OutputChannelId, this._fileService, this._terminalProfileResolverService,
-			this._pathService, this._viewDescriptorService, this._logService, this._configurationService, this._notificationService,
-			this, this._instantiationService,
+			this._pathService, this._viewDescriptorService, this._logService, this._notificationService,
+			this._instantiationService,
 			(workspaceFolder: IWorkspaceFolder | undefined) => {
 				if (workspaceFolder) {
 					return this._getTaskSystemInfo(workspaceFolder.uri.scheme);
@@ -2201,6 +2202,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 			return new Map();
 		}
 		await this._waitForSupportedExecutions;
+		await this._whenTaskSystemReady;
 		if (this._workspaceTasksPromise) {
 			return this._workspaceTasksPromise;
 		}
@@ -2352,11 +2354,11 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		return { workspaceFolder, set: undefined, configurations: undefined, hasErrors: false };
 	}
 
-	private async _computeTasksForSingleConfig(workspaceFolder: IWorkspaceFolder | undefined, config: TaskConfig.IExternalTaskRunnerConfiguration | undefined, runSource: TaskRunSource, custom: CustomTask[], customized: IStringDictionary<ConfiguringTask>, source: TaskConfig.TaskConfigSource, isRecentTask: boolean = false): Promise<boolean> {
-		if (!config || !workspaceFolder) {
+	private async _computeTasksForSingleConfig(workspaceFolder: IWorkspaceFolder, config: TaskConfig.IExternalTaskRunnerConfiguration | undefined, runSource: TaskRunSource, custom: CustomTask[], customized: IStringDictionary<ConfiguringTask>, source: TaskConfig.TaskConfigSource, isRecentTask: boolean = false): Promise<boolean> {
+		if (!config) {
 			return false;
 		}
-		const taskSystemInfo: ITaskSystemInfo | undefined = workspaceFolder ? this._getTaskSystemInfo(workspaceFolder.uri.scheme) : undefined;
+		const taskSystemInfo: ITaskSystemInfo | undefined = this._getTaskSystemInfo(workspaceFolder.uri.scheme);
 		const problemReporter = new ProblemReporter(this._outputChannel);
 		if (!taskSystemInfo) {
 			problemReporter.fatal(nls.localize('TaskSystem.workspaceFolderError', 'Workspace folder was undefined'));
@@ -2875,12 +2877,11 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 
 	/**
 	 *
-	 * @param tasks - The tasks which need filtering from defaults and non-defaults
-	 * @param taskGlobsInList - This tells splitPerGroupType to filter out globbed tasks (into default), otherwise fall back to boolean
+	 * @param tasks - The tasks which need to be filtered
+	 * @param taskGlobsInList - This tells splitPerGroupType to filter out globbed tasks (into defaults)
 	 * @returns
 	 */
-	private _splitPerGroupType(tasks: Task[], taskGlobsInList: boolean = false): { none: Task[]; defaults: Task[] } {
-		const none: Task[] = [];
+	private _getDefaultTasks(tasks: Task[], taskGlobsInList: boolean = false): Task[] {
 		const defaults: Task[] = [];
 		for (const task of tasks) {
 			// At this point (assuming taskGlobsInList is true) there are tasks with matching globs, so only put those in defaults
@@ -2888,11 +2889,9 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 				defaults.push(task);
 			} else if (!taskGlobsInList && (task.configurationProperties.group as TaskGroup).isDefault === true) {
 				defaults.push(task);
-			} else {
-				none.push(task);
 			}
 		}
-		return { none, defaults };
+		return defaults;
 	}
 
 	private _runTaskGroupCommand(taskGroup: TaskGroup, strings: {
@@ -2909,7 +2908,6 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 			title: strings.fetching
 		};
 		const promise = (async () => {
-
 			let taskGroupTasks: (Task | ConfiguringTask)[] = [];
 
 			async function runSingleTask(task: Task | undefined, problemMatcherOptions: IProblemMatcherRunOptions | undefined, that: AbstractTaskService) {
@@ -2961,12 +2959,12 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 					if (tasks.length > 0) {
 						// If we're dealing with tasks that were chosen because of a glob match,
 						// then put globs in the defaults and everything else in none
-						const { none, defaults } = this._splitPerGroupType(tasks, areGlobTasks);
+						const defaults = this._getDefaultTasks(tasks, areGlobTasks);
 						if (defaults.length === 1) {
 							runSingleTask(defaults[0], undefined, this);
 							return;
-						} else if (defaults.length + none.length > 0) {
-							tasks = defaults.concat(none);
+						} else if (defaults.length > 0) {
+							tasks = defaults;
 						}
 					}
 
